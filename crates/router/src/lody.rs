@@ -7,6 +7,8 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -23,6 +25,8 @@ const MAX_ATTACHMENT_BYTES: u64 = 100 << 20;
 const CLI_TIMEOUT: Duration = Duration::from_secs(60);
 /// How much of the CLI's output is kept.
 const OUTPUT_LIMIT: u64 = 64 * 1024;
+/// How long after the CLI exits its output is still waited for.
+const PIPE_GRACE: Duration = Duration::from_secs(2);
 
 const APP_NODE: &str = "/Applications/Lody.app/Contents/MacOS/Lody";
 const APP_CLI: &str =
@@ -271,17 +275,26 @@ fn run(cli: &Cli, args: &[OsString], timeout: Duration) -> Result<Ran> {
         .spawn()
         .with_context(|| format!("Could not run Lody's CLI ({})", cli.origin))?;
     let keep = |stream: Option<Box<dyn Read + Send>>| {
-        std::thread::spawn(move || {
-            let mut kept = Vec::new();
-            if let Some(mut stream) = stream {
-                let _ = (&mut stream).take(OUTPUT_LIMIT).read_to_end(&mut kept);
-                let _ = std::io::copy(&mut stream, &mut std::io::sink());
-            }
-            String::from_utf8_lossy(&kept).into_owned()
-        })
+        let kept = Arc::new(Mutex::new(Vec::new()));
+        let (done, finished) = mpsc::channel();
+        if let Some(mut stream) = stream {
+            let kept = kept.clone();
+            std::thread::spawn(move || {
+                let mut chunk = [0; 4096];
+                while let Ok(read) = stream.read(&mut chunk)
+                    && read > 0
+                {
+                    let mut kept = kept.lock().unwrap_or_else(|error| error.into_inner());
+                    let room = (OUTPUT_LIMIT as usize).saturating_sub(kept.len());
+                    kept.extend_from_slice(&chunk[..read.min(room)]);
+                }
+                let _ = done.send(());
+            });
+        }
+        (kept, finished)
     };
-    let stdout = keep(child.stdout.take().map(|s| Box::new(s) as _));
-    let stderr = keep(child.stderr.take().map(|s| Box::new(s) as _));
+    let (stdout, stdout_done) = keep(child.stdout.take().map(|s| Box::new(s) as _));
+    let (stderr, stderr_done) = keep(child.stderr.take().map(|s| Box::new(s) as _));
     let deadline = Instant::now() + timeout;
     let status = loop {
         if let Some(status) = child.try_wait().context("Could not wait for Lody's CLI")? {
@@ -294,10 +307,17 @@ fn run(cli: &Cli, args: &[OsString], timeout: Duration) -> Result<Ran> {
         }
         std::thread::sleep(Duration::from_millis(20));
     };
+    // A process the CLI left behind may hold the pipes open; what it wrote by then is the answer.
+    let _ = stdout_done.recv_timeout(PIPE_GRACE);
+    let _ = stderr_done.recv_timeout(PIPE_GRACE);
+    let text = |kept: &Mutex<Vec<u8>>| {
+        String::from_utf8_lossy(&kept.lock().unwrap_or_else(|error| error.into_inner()))
+            .into_owned()
+    };
     Ok(Ran {
         success: status.success(),
-        stdout: stdout.join().unwrap_or_default(),
-        stderr: stderr.join().unwrap_or_default(),
+        stdout: text(&stdout),
+        stderr: text(&stderr),
     })
 }
 
@@ -799,6 +819,26 @@ exit 1"#,
             "session cancel ses_abc --json --workspace gabyran\nsession archive ses_abc --json --workspace gabyran\n"
         );
         assert!(withdraw_with(&config(None, Some(&fake)), &none(), "--all", CLI_TIMEOUT).is_err());
+    }
+
+    #[test]
+    fn a_process_the_cli_leaves_holding_its_output_does_not_hold_up_the_answer() {
+        let dir = temp_dir("orphan");
+        let fake = script(
+            &dir,
+            "lody",
+            r#"sleep 30 &
+echo '{"ok":true,"sessionId":"ses_orphan"}'"#,
+        );
+        let started = Instant::now();
+        let created = send_bundle_with(
+            &config(Some("r"), Some(&fake)),
+            &none(),
+            &bundle(&dir, b"png"),
+        )
+        .unwrap();
+        assert_eq!(created.session_id, "ses_orphan");
+        assert!(started.elapsed() < Duration::from_secs(10));
     }
 
     #[test]
