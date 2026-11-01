@@ -69,8 +69,8 @@ hex
 │   ├── start|stop|cancel|status   record a capture, end or discard it, or report
 │   ├── list [--limit N]           the newest captures in the captures folder
 │   ├── show <capture>             one capture's words, files, and where it went
-│   ├── send <capture> [--to <session>] [--always]  send it to an OpenCode session
-│   └── route <capture> [--ask-jev]  what routing sees and decides; sends nothing
+│   ├── send <capture> [--to <role>]  send it to a new Lody session for the Agent Role
+│   └── route <capture>            what a send would do (Agent Role, Lody CLI, files); sends nothing
 ├── labs [on|off <feature>]       list Labs features or turn one on/off; edits settings.json (features/labs.md)
 │   └── link <feature>             macOS: print hex://labs/<feature>, the link that opens Hex's Labs page at that row
 ├── check-for-updates              check for an update now
@@ -174,15 +174,16 @@ are still writing is refused with `busy`. Every action is idempotent.
 `<capture>` is a bundle name (`1792933491953.scrawl`, the extension
 optional), a path, or `latest`. `list`, `show`, and `route` read the captures
 folder and need only the experiment; `send` needs captures on and a listening
-Hex. `send` with `--to` takes a session ID; for the newest capture it also
-takes a name its route lists, and it acts as the capsule's pick, so the
-capsule's Undo follows it. Without `--to` it goes where the capture's route
-(its rule, or its first guess) or its last send says. `--always`, for the
-newest capture only, also saves a rule sending its site or app there, as the
-capsule's ⇧⏎ does. Its reply says what became of it (`Sent to …`,
-`Queued for …` when OpenCode didn't answer, which Hex retries). `route` is
-Scrawl's `route --explain` (`--explain` is accepted); `--ask-jev` asks Jev
-again, one network call. An unknown capture is refused with `not-found`.
+Hex. `send` makes a new Lody session for the Agent Role in
+`capture.routing.agentLody` (`hex settings set
+capture.routing.agentLody.agentRole <ID or name>`); `--to` can only name that
+role, `--always` is refused, and with no role set `send` is refused. For the
+newest capture it acts as the capsule's pick, so the capsule's Undo follows
+it. Its reply says what became of it (`Sent to …`, `Queued for …` when Lody
+didn't answer, which Hex retries). `route` says what a send would do: the
+role, the project, the Lody CLI that would run, and the files that would go
+(`--explain` and `--ask-jev` are accepted and ignored). An unknown capture is
+refused with `not-found`.
 
 A CLI-started meeting is the same recording the menu bar starts: the menu-bar
 state, the recording capsule, and Stop & Transcribe all apply to it.

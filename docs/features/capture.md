@@ -10,8 +10,9 @@ PipeWire (`capture.linux`), on Windows Windows.Graphics.Capture
 mirror) and narration from Hex's microphone, takes ink and clicks (Shift on
 macOS and Windows, or the Annotate key held or the pen), transcribes the narration with word timestamps on
 Hex's loaded model, writes a Scrawl bundle into Scrawl's captures folder,
-copies it to the clipboard, and sends it to an OpenCode session with Scrawl's
-router (`crates/router`), run in Hex's process. Settings › Annotate (under
+copies it to the clipboard, and sends it to Lody, a new session for the Agent
+Role in `capture.routing` (`crates/router`'s `lody`, through Lody's CLI), run
+in Hex's process. Settings › Annotate (under
 Labs in the sidebar) holds its settings. Scrawl's capsule (switch
 chips, the on-screen picker, route chips) and its ink and laser overlay are
 Rune overlays.
@@ -124,11 +125,9 @@ On Linux                                 // capture.linux
 │   or grab already took their keys, so nothing reaches the app)
 ├── Pane -> no Screen Recording row, no transcriber choice, no "Show in screen
 │   recordings" (the portal asks; Wayland can't keep overlays out)
-├── Sending -> OpenCode's sessions and prompts over HTTP to the running
-│   service its registration names (service.json); nothing is started, and
-│   with no service the send says "OpenCode isn't running". The capsule's
-│   rows are clicked (no keyboard).
-│   See capture.send: everything goes inline, so a remote server works
+├── Sending -> Lody's CLI (`lody session create`); nothing is started, and
+│   with Lody not running the send says "Lody isn't running". The capsule's
+│   rows are clicked (no keyboard). See capture.send
 └── Gaps: no Area on Wayland (it gives Hex no pointer to aim it; X11 takes
     `--area`), no area picker on screen, no iPhone, no
     laser or click log outside draw mode, no window log, `hex capture status`
@@ -200,8 +199,9 @@ First launch with Annotate on            // capture.import
 ├── ~/.config/scrawl/config.json -> transcriber (apple; else Parakeet), capturesDir,
 │   retention, read once (migration `scrawl-capture-settings`); token not used
 ├── Scrawl's router settings -> capture.routing, read once (migration
-│   `scrawl-routing-settings`): rules, autoSend, smartRouting and jevRouting;
-│   never the Jev key (Jev uses $OPENCODE_API_KEY or OpenCode's credential)
+│   `scrawl-routing-settings`): autoSend and the rest of Scrawl's router
+│   settings, which Lody sends don't use; never the Jev key. `agentLody`
+│   (the Agent Role) is Hex's own and is not imported
 ├── Scrawl's Application Support config.json -> its shortcut, unless it collides
 └── Scrawl's files are never written
 
@@ -334,7 +334,10 @@ The capsule                              // capture.capsule (rune_ui/capture_cap
 │   recording", the recording running on; Discard -> `hex capture cancel`.
 │   Unanswered, it goes back to recording after 4 s (never while hovered, and
 │   1.5 s after the pointer leaves). Esc never discards
-├── Routing (Scrawl's routing.md) -> `last.route` once its answer arrives; the
+├── Routing (a Lody Agent Role; capture.route) -> `last.route` once a capture is
+│   written. The route is always the one the person set, so only the first
+│   branch below happens; the others (guesses, Nothing, Unreachable) are
+│   states the capsule can draw that Lody never produces. The
 │   capsule shows a rule's and a pick's send as sent itself, and follows
 │   only the send going (its tone), Queued (then Sent), how an Undo ended,
 │   and a failed send
@@ -580,8 +583,8 @@ While it records                         // capture.audio
 
 Never on Hex's path                      // capture.isolation
 ├── No microphone, event tap, global shortcut, or model of its own
-├── No ingest server (47777) or recovery workers; delivery retries only while
-│   neither Scrawl.app runs nor anything serves the ingest port (capture.route)
+├── No ingest server (47777) or recovery workers; delivery retries run on the
+│   capture-route thread (capture.route)
 ├── No ingest token used; Scrawl's two config files read once by the import, never
 │   written; nothing else of Scrawl's touched (its log goes to Hex's tracing)
 └── Settings from Hex (capture.*), not Scrawl's config: auto-crop on (display
@@ -617,88 +620,67 @@ hex capture stop                         // capture.stop
     ├── Written -> image and text copied to the clipboard (Scrawl's handoff)
     └── Sent -> the capture-route thread (capture.route)
 
-What a send carries                      // capture.send (router opencode::send_bundle)
-├── One prompt: the summary (transcript, marks, notes) as text, then the
-│   contact sheet as one inline `data:image/png;base64` file part
-│   (12 MiB encoded at most; past it, no image). The keyframes are not
-│   attached; the text says they are in `frames/` and `frames-full/` of the
-│   capture folder. The picture does not depend on the folder, so an OpenCode
-│   server on another machine reads it; the text only names where it was recorded
-├── Every request goes to the running local service over HTTP
-│   (service.json); a service that isn't up is never started
-├── With an agent host (routing's agentHost) the bundle is synced there and
-│   the contact sheet goes as a `file://` part instead; SSH can't carry the
-│   images
+What a send carries                      // capture.send (router lody::send_bundle)
+├── One new Lody session per capture, for `capture.routing.agentLody.agentRole`
+│   (an Agent Role's ID or name; `localProject` optionally names the project it
+│   works in, and `workspace` the Lody workspace, which a login with several
+│   needs: the CLI refuses to pick one): `lody session create --json --agent-role <role>
+│   [--local-project <p>] [--workspace <w>] --prompt-file <file> [--attach <contact sheet>]`
+├── The prompt file is the summary (transcript, marks, notes) as text, then a
+│   line saying whether the contact sheet is attached and where the capture
+│   was recorded. It is written 0600 in the temp folder and removed after the
+│   send, whatever the outcome
+├── The contact sheet goes as one `--attach` (a PNG, at most 100 MiB; Lody
+│   allows 8 files). The keyframes are not attached; the text says they are in
+│   `frames/` and `frames-full/` of the capture folder on the Mac that
+│   recorded it. A capture with no screen has no image
+├── The CLI is found, never started: `agentLody.cli` alone when set; else `lody`
+│   on PATH, then Lody.app's own (`Contents/MacOS/Lody` running
+│   `resources/cli/index.js` with ELECTRON_RUN_AS_NODE). One that doesn't know
+│   `--agent-role` or `--attach` (an older `lody`) is passed over for the next
+├── Lody's files and ports are never read; a CLI that fails (the local runtime
+│   isn't up: "Lody isn't running"), isn't found, or doesn't answer in 60 s
+│   queues the send
 ├── No video: a capture's movie is too large for a prompt
-└── Check: router opencode tests; a send from apollo to a throwaway session
-    on OpenCode V2 stored the contact sheet and keyframe as inline image/png (before one-sheet)
-    (2026-10-29)
+└── Check: `lody` tests in crates/router, with fake `lody` scripts; no test
+    makes a real Lody session
 
 Where it goes                            // capture.route; capture.routing's autoSend on
-├── At the stop, beside the writing -> a capture-look thread reads the tab,
-│   terminal, and sessions in front (Scrawl's router, in Hex's process, with
-│   Scrawl's own router folders, so `scrawl router undo` and its evals see Hex's
-│   sends as Scrawl's). The whole look has 15 s: steps not begun by then are
-│   skipped, and routing waits 1 s more for the one under way, then goes on
-│   without it. An app rule's folder is read with the sessions, and a failed
-│   page of sessions keeps what was read and still reads the folders and
-│   sessions that rules name
-├── Written -> the one capture-route thread (queue 16) decides; the snapshot's
-│   `last.route` follows: Looking -> Rule | Guess | Nothing | NoAnswer |
-│   Unreachable
-│   ├── Rule -> only a rule the person saved (`routing.sites`, `routing.apps`,
-│   │   a Shift pick's): sent at once, Sending -> Sent, or Queued
-│   │   when OpenCode didn't take it; Undo takes it back as it does a pick. Whatever
-│   │   autoSend, smartRouting, or jevRouting say, a saved rule sends and
-│   │   nothing else sends on its own. smartRouting off decides with the port
-│   │   ladder, after rules and addresses, on the same look
-│   ├── Guess -> everything else the router would send (Jev's pick, HOME when
-│   │   Jev couldn't tell, a dev server's port, a page's data-session or
-│   │   publisher, a name that was said, the captured app's checkout (the one
-│   │   open session folder named like the app, such as `…/hex` for Hex's own
-│   │   Settings; smartRouting only), the port ladder) is suggestion #1, its
-│   │   reason as the row's word ("dev server", "same page", "mentioned"; none
-│   │   for Jev's pick or fallback), then
-│   │   the runners-up and recent sessions; nothing sent until one is picked.
-│   │   `site` names what a Shift pick (Shift+click, ⇧⏎ in the list,
-│   │   or `send --always`) would save, after which that site's captures are Rules;
-│   │   ⇧⏎ in a Rule's list saves the rule for the session picked instead
-│   ├── Each Rule or Guess -> routing.json's `shown`: `as` rule or guess, and
-│   │   `why`, the router's leading reason; `hex capture route` prints it
-│   ├── Nothing / NoAnswer -> recent sessions only
-│   └── Unreachable -> the look read no sessions (OpenCode slow past the look's
-│       deadline, down, or refusing); a warning in process.log with the error, and
-│       the capsule reads "Couldn't reach OpenCode" with why ("didn't answer in
-│       time"), keeping Paste
-├── An answer for a capsule already closed (dismissed, or past its hold)
-│   leaves it closed; `hex capture list` and `send` still offer the capture
+├── No Agent Role set, or autoSend off -> no route: the capture is only copied,
+│   and Settings › Annotate › Lody says "Not set: annotations are only copied"
+│   with the command that sets it (`hex settings set
+│   capture.routing.agentLody.agentRole <ID or name>`; `…localProject`,
+│   `…workspace` and `…cli` beside it)
+├── Written -> the one capture-route thread (queue 16) sends at once:
+│   `last.route` is Rule (to the role), then Sending -> Sent, or Queued
+├── Queued -> retried every 15 s (15 s doubling to 30 min for a day, then
+│   `.deliver-failed.json`); a retried send can't be undone, so its "Sent to X"
+│   has no Undo. A queued or too-late-to-undo send leaves after the brief hold
+│   (4 s) rather than the 25 s done hold; a taken back capture with nothing to
+│   list ('Taken back') does too. Retries use the settings in force then
+├── The sent capture's `scrawl.json` records the Lody session (`destination`),
+│   which `hex capture list` shows
 ├── The capsule's commands act only on `last`, the newest routed capture:
-│   ├── Send{to} -> the Rule's own session, already sent, does nothing; any
-│   │   other pick sends there (taking back a send already elsewhere first) and logs
-│   │   the correction; `always` also saves a rule for its site or app
-│   └── Undo -> a sent one is withdrawn unless the
-│       session acted on it (TooLate); an undo the router fails is TooLate too
-├── Two sends to one place agree -> `offer` names the site or app a rule could
-│   send straight there
-├── Queued sends -> retried every 15 s, unless Scrawl.app runs or something
-│   serves the ingest port (that process retries); a retried send can't be
-│   undone, so its "Sent to X" has no Undo. A queued or too-late-to-undo send
-│   leaves after the brief hold (4 s) rather than the 25 s done hold; a taken
-│   back capture with nothing to list ('Taken back') does too
-└── autoSend off -> no look, no route; the capture is only copied
+│   ├── Send{to} -> `to` is the role; one already sent or queued does nothing,
+│   │   one taken back is sent again as a new session
+│   └── Undo -> `lody session cancel` then `lody session archive` on the session
+│       it made (Lody can restore it); Lody refusing reads TooLate. A queued
+│       send's marker is removed instead
+└── autoSend off -> no route; the capture is only copied
 
 hex capture list|show|send|route         // capture.cli; docs/cli.md
 ├── list [--limit N] -> the newest bundles in the captures folder: mode, words,
 │   where it went
 ├── show <capture> -> one capture's words, files, and send
-├── send <capture> [--to <session>] [--always] -> needs a listening Hex
-│   ├── The last routed capture -> as the capsule's pick (no --to: the Rule's
-│   │   session, a Guess's first suggestion, or the recorded destination), so
-│   │   the capsule's Undo follows it; --always also saves the site or app rule
-│   │   for the session it goes to. Also when a newer capture was written first
-│   └── Older -> --to must be a session ID; without it, its recorded
-│       destination; --always is refused
-├── route <capture> [--ask-jev] -> what the router sees and decides; sends nothing
+├── send <capture> [--to <role>] [--always] -> needs a listening Hex
+│   ├── The last routed capture -> as the capsule's pick, so the capsule's Undo
+│   │   follows it; one already sent or queued says so
+│   ├── Older -> a new Lody session for the Agent Role, with no Undo
+│   ├── --to can only name the configured Agent Role; --always is refused (no
+│   │   rules); with no Agent Role set the send is refused
+│   └── Queued when Lody didn't take it ("Queued for …: Lody isn't running")
+├── route <capture> [--ask-jev] -> the Agent Role, project, Lody CLI that would
+│   run, and files that would go; sends nothing (--ask-jev is ignored)
 └── <capture> = bundle name, path, or `latest`; unknown -> `not-found`
 
 hex capture cancel -> engine cancelled, sink closed, bundle removed
@@ -785,22 +767,20 @@ Checks:
   [audio.rs](../../crates/capture/src/audio.rs). The mirror, its
   `--no-microphone`, and the camera prompt have not run in Hex.
 - Routing, in [routing.rs](../../src/capture_host/routing.rs):
-  `only_a_saved_rule_sends_on_its_own`,
-  `a_rule_sends_and_lists_the_rest`,
-  `a_guess_sends_nothing_and_a_failure_still_lists_recent_sessions`, and
-  its `looked` tests, which write a bundle and route it through `look` and
-  `Worker::written` with fake sessions and tab:
-  `a_saved_site_or_app_rule_sends_whatever_the_routing_flags`,
-  `the_port_ladder_is_a_guess`, `the_captured_apps_checkout_is_a_guess`,
-  `a_look_past_its_deadline_is_routed_without`,
-  `an_always_rule_names_the_session_it_sends_to`,
-  `an_always_rule_keeps_sending_to_the_session_picked`, and
-  `a_capture_routed_after_a_newer_one_settled_is_still_sendable_by_name`;
-  `an_always_rule_makes_its_sites_next_capture_a_saved_rule`,
-  `a_failing_page_keeps_what_was_read_and_still_reads_what_rules_name`,
-  `an_app_rules_folder_is_read_with_the_sessions`, and
-  `a_look_past_its_deadline_skips_what_it_hadnt_begun`
-  in [look.rs](../../crates/router/src/routing/look.rs); the CLI's
+  `nothing_is_sent_without_an_agent_role_or_with_autosend_off`,
+  `a_written_capture_goes_to_the_agent_role_at_once`,
+  `a_send_lody_did_not_take_is_queued_and_retried_through_the_cli`,
+  `undo_withdraws_the_session_and_a_refusal_is_too_late`,
+  `undoing_a_queued_send_stops_its_retries`,
+  `a_taken_back_capture_is_sent_again_when_the_role_is_picked`,
+  `the_cli_sends_to_the_agent_role_only_and_saves_no_rules`,
+  `the_real_send_runs_lody_with_the_role_and_the_summary` (a fake `lody`
+  script) and `a_failed_send_says_what_went_wrong`; the CLI's command line,
+  prompt file, CLI lookup, and withdraw in the `lody` tests of
+  [lody.rs](../../crates/router/src/lody.rs); the `agentLody` keys in
+  `the_lody_agent_role_is_set_by_its_own_key_and_cleared_with_none`
+  ([control/settings.rs](../../src/control/settings.rs)); the pane's hint in
+  `the_pane_says_when_no_lody_agent_role_is_set_and_only_then`; the CLI's
   `a_capture_on_disk_summarizes_its_mode_words_and_send` in
   [library.rs](../../src/capture_host/library.rs), the protocol round trips in
   control.rs, and `control_commands_parse` in main.rs.

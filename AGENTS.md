@@ -522,8 +522,8 @@ substitute for source inspection or a second roadmap.
   coexistence, the retention thread, and the `CaptureSnapshot` every view
   reads (`capture_host::snapshot`/`watch`, published on each change, so a
   capsule never reaches into the host), with `last.route` from
-  `capture_host::routing` (Scrawl's `crates/router` in-process: look, decide,
-  undo window, send, Undo and Redirect) and `phone` from a `capture-phone`
+  `capture_host::routing` (a new Lody session per capture through Lody's CLI,
+  `crates/router`'s `lody` in-process: send, retries, Undo) and `phone` from a `capture-phone`
   look for a cabled iPhone. The engine records the screen on macOS through
   `crates/capture-core` (`Recorder`, one source per target, also outside the
   workspace), which writes `recording.mp4` and its `capture.json` manifest
@@ -935,13 +935,14 @@ CoreAudio formats, AppleScript details, or event serialization.
   records the screen, runs with `SharedResources::none()` (Hex never calls
   `install_shared_resources`: no ingest server, ingest token, or global
   shortcuts), logs to tracing, and writes only to the captures folder
-  (`capture.folder`, Scrawl's own by default) and Scrawl's router folders. A
+  (`capture.folder`, Scrawl's own by default). A
   written capture is copied to the clipboard (never pasted) and, with
-  `capture.routing`'s autoSend on, routed by Scrawl's router in Hex's process
-  (`capture_host::routing`): one `capture-look` thread per stop, one
-  `capture-route` thread with a bounded queue, a rule's send held 3 s for
-  Undo, guesses sent only when picked. Queued sends retry only while neither
-  Scrawl.app runs nor anything serves the ingest port, and never in tests.
+  `capture.routing`'s autoSend on and an Agent Role set
+  (`capture.routing.agentLody.agentRole`), sent to Lody in Hex's process
+  (`capture_host::routing`): one `capture-route` thread with a bounded queue
+  makes a new Lody session through the `lody` CLI (found, never started;
+  Lody's files and ports untouched). Queued sends retry every 15 s on that
+  thread, never in tests. With no Agent Role nothing is sent.
   `capture.routing` never holds a Jev key. A cabled iPhone records through
   `scrawl-helper mirror --no-microphone`, narrated by the dictation timeline
   (macOS only: Linux lists no phone, so it never shows). Hex's capture
