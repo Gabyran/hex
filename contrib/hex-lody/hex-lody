@@ -11,6 +11,8 @@ Config (~/.config/hex-lody/config.json):
   machine       machine id or name, when the role runs on several
   localProject  Lody local project id, name or path
   cli           the Lody CLI to run, as a path (default: Lody.app's own)
+  env           environment for the CLI when this runs outside a Lody session; it needs
+                LODY_AUTH_URL, LODY_AUTH_SITE_URL and LODY_SERVER_URL (existing values win)
   captures      Hex's captures folder
 
 Commands: send <capture>, scan, undo [capture], install, uninstall, status.
@@ -41,6 +43,9 @@ SETTLE_SECONDS = 3
 GIVE_UP_AFTER = 5
 MAX_ATTACH_BYTES = 100 << 20
 CREATE_TIMEOUT = 120
+RETRY_ATTEMPTS = 3
+RETRY_SECONDS = 5
+TRANSIENT = ("fetch failed", "Streams sync failed", "Flock document sync failed")
 
 
 def log(line):
@@ -103,7 +108,7 @@ def lody(config, *args):
         capture_output=True,
         text=True,
         timeout=CREATE_TIMEOUT,
-        env={**os.environ, **env},
+        env={**config.get("env", {}), **os.environ, **env},
     )
 
 
@@ -162,7 +167,7 @@ def create_args(config, prompt_file, attach, wait):
     return args
 
 
-def send(config, bundle, extra="", wait=False, dry_run=False):
+def send(config, bundle, extra="", wait=False, dry_run=False, attempts=1):
     text, attach = prompt_of(bundle, extra)
     fd, name = tempfile.mkstemp(prefix="hex-lody-prompt-", suffix=".md")
     prompt_file = Path(name)
@@ -174,15 +179,19 @@ def send(config, bundle, extra="", wait=False, dry_run=False):
             print("lody " + " ".join(args))
             print("---\n" + text)
             return None
-        run = lody(config, *args)
+        for attempt in range(1, attempts + 1):
+            run = lody(config, *args)
+            reply = reply_of(run)
+            if run.returncode == 0 and reply and reply.get("ok"):
+                return reply
+            lines = run.stderr.strip().splitlines()
+            message = (reply or {}).get("error") or (lines[-1] if lines else run.stdout[-200:])
+            if attempt == attempts or not message.startswith(TRANSIENT):
+                raise RuntimeError(f"lody session create failed: {message}")
+            log(f"{bundle.name}: {message} (attempt {attempt}/{attempts}, retrying)")
+            time.sleep(RETRY_SECONDS)
     finally:
         prompt_file.unlink(missing_ok=True)
-    reply = reply_of(run)
-    if run.returncode != 0 or not reply or not reply.get("ok"):
-        lines = run.stderr.strip().splitlines()
-        message = (reply or {}).get("error") or (lines[-1] if lines else run.stdout[-200:])
-        raise RuntimeError(f"lody session create failed: {message}")
-    return reply
 
 
 def notify(text):
@@ -319,6 +328,7 @@ def main():
     one.add_argument("--extra", default="", help="text added after the summary")
     one.add_argument("--wait", action="store_true", help="wait for the first reply and print it")
     one.add_argument("--dry-run", action="store_true", help="print the Lody command and prompt")
+    one.add_argument("--force", action="store_true", help="send even if this capture was sent or undone")
     every = commands.add_parser("scan", help="send new captures (what the watcher runs)")
     every.add_argument("--all", action="store_true", help="include captures made before install")
     back = commands.add_parser("undo", help="cancel and archive the newest (or named) sent session")
@@ -335,17 +345,30 @@ def main():
         bundle = args.capture.expanduser().resolve()
         if not (bundle / "scrawl.json").is_file():
             sys.exit(f"hex-lody: {bundle} is not a capture folder")
-        reply = send(config, bundle, args.extra, args.wait, args.dry_run)
-        if reply:
-            with Locked():
-                state = load_state()
-                state["sent"][bundle.name] = {
-                    "sessionId": reply["sessionId"],
-                    "workspace": config.get("workspace"),
-                    "atMs": int(time.time() * 1000),
-                }
-                save_state(state)
-            print(json.dumps(reply, ensure_ascii=False))
+        if args.dry_run:
+            send(config, bundle, args.extra, args.wait, True)
+            return
+        with Locked():
+            state = load_state()
+            if not args.force and (bundle.name in state["sent"] or bundle.name in state.get("undone", [])):
+                print(f"hex-lody: {bundle.name} was already handled (--force sends it again)", file=sys.stderr)
+                return
+            try:
+                reply = send(config, bundle, args.extra, args.wait, attempts=RETRY_ATTEMPTS)
+            except Exception as error:
+                log(f"{bundle.name}: {error}")
+                notify(f"Could not send {bundle.name} to Lody: {error}")
+                sys.exit(1)
+            state["sent"][bundle.name] = {
+                "sessionId": reply["sessionId"],
+                "workspace": config.get("workspace"),
+                "atMs": int(time.time() * 1000),
+            }
+            if bundle.name in state.get("undone", []):
+                state["undone"].remove(bundle.name)
+            save_state(state)
+        log(f"{bundle.name}: sent as session {reply['sessionId']}")
+        print(json.dumps(reply, ensure_ascii=False))
     elif args.command == "scan":
         scan(config, args.all)
     elif args.command == "undo":
