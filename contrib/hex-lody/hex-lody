@@ -1,0 +1,360 @@
+#!/usr/bin/env python3
+"""Send Hex Annotate captures to a new Lody session, from outside Hex.
+
+Hex writes each capture to a `<id>.scrawl` folder in its captures folder. This tool reads
+that folder, makes one Lody session per capture for the Agent Role in its config, and
+attaches the contact sheet. Hex itself is not changed.
+
+Config (~/.config/hex-lody/config.json):
+  agentRole     Lody Agent Role id or name (required)
+  workspace     Lody workspace id, slug or name
+  machine       machine id or name, when the role runs on several
+  localProject  Lody local project id, name or path
+  cli           the Lody CLI to run, as a path (default: Lody.app's own)
+  captures      Hex's captures folder
+
+Commands: send <capture>, scan, undo [capture], install, uninstall, status.
+"""
+
+import argparse
+import fcntl
+import json
+import os
+import plistlib
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+HOME = Path.home()
+CONFIG = Path(os.environ.get("HEX_LODY_CONFIG", HOME / ".config/hex-lody/config.json"))
+STATE_DIR = Path(os.environ.get("HEX_LODY_STATE", HOME / ".local/state/hex-lody"))
+STATE = STATE_DIR / "state.json"
+LOG = STATE_DIR / "log"
+CAPTURES = HOME / "Library/Application Support/scrawl/captures"
+APP = Path("/Applications/Lody.app/Contents")
+LABEL = "com.hex-lody.scan"
+PLIST = HOME / "Library/LaunchAgents" / f"{LABEL}.plist"
+SCAN_SECONDS = 15
+SETTLE_SECONDS = 3
+GIVE_UP_AFTER = 5
+MAX_ATTACH_BYTES = 100 << 20
+CREATE_TIMEOUT = 120
+
+
+def log(line):
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    with open(LOG, "a") as f:
+        f.write(f"{time.strftime('%F %T')} {line}\n")
+    print(line, file=sys.stderr)
+
+
+def load_config():
+    try:
+        config = json.loads(CONFIG.read_text())
+    except FileNotFoundError:
+        sys.exit(f"hex-lody: no config at {CONFIG}")
+    if not config.get("agentRole"):
+        sys.exit(f"hex-lody: agentRole is not set in {CONFIG}")
+    return config
+
+
+def captures_dir(config):
+    return Path(config.get("captures") or CAPTURES).expanduser()
+
+
+def load_state():
+    try:
+        return json.loads(STATE.read_text())
+    except (FileNotFoundError, ValueError):
+        return {"armedAtMs": int(time.time() * 1000), "sent": {}, "failed": {}}
+
+
+def save_state(state):
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = STATE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state, indent=2))
+    tmp.replace(STATE)
+
+
+class Locked:
+    def __enter__(self):
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        self.file = open(STATE_DIR / "lock", "w")
+        fcntl.flock(self.file, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *_):
+        self.file.close()
+
+
+def lody(config, *args):
+    if config.get("cli"):
+        command, env = [str(Path(config["cli"]).expanduser())], {}
+    else:
+        command = [
+            str(APP / "MacOS/Lody"),
+            str(APP / "Resources/app.asar.unpacked/resources/cli/index.js"),
+        ]
+        env = {"ELECTRON_RUN_AS_NODE": "1"}
+    return subprocess.run(
+        [*command, *args],
+        capture_output=True,
+        text=True,
+        timeout=CREATE_TIMEOUT,
+        env={**os.environ, **env},
+    )
+
+
+def reply_of(run):
+    for line in reversed(run.stdout.splitlines()):
+        if line.startswith("{"):
+            try:
+                return json.loads(line)
+            except ValueError:
+                continue
+    return None
+
+
+def manifest_of(bundle):
+    return json.loads((bundle / "scrawl.json").read_text())
+
+
+def prompt_of(bundle, extra):
+    manifest = manifest_of(bundle)
+    summary = (bundle / "summary.md").read_text().rstrip()
+    sheet = (bundle / manifest.get("contactSheet", "")).resolve()
+    attach = []
+    if (
+        manifest.get("keyframes")
+        and manifest.get("contactSheet")
+        and bundle.resolve() in sheet.parents
+        and sheet.is_file()
+        and sheet.stat().st_size <= MAX_ATTACH_BYTES
+    ):
+        attach.append(sheet)
+    text = summary + "\n"
+    if attach:
+        text += (
+            "\nAttached: the contact sheet (every keyframe in order). Full-size frames are in "
+            "frames/ and frames-full/ in the recording folder on this Mac.\n"
+        )
+    if extra:
+        text += f"\n{extra}\n"
+    return text, attach
+
+
+def create_args(config, prompt_file, attach, wait):
+    args = ["session", "create", "--json", "--agent-role", config["agentRole"]]
+    for flag, key in (
+        ("--workspace", "workspace"),
+        ("--machine", "machine"),
+        ("--local-project", "localProject"),
+    ):
+        if config.get(key):
+            args += [flag, str(config[key])]
+    args += ["--prompt-file", str(prompt_file)]
+    for path in attach:
+        args += ["--attach", str(path)]
+    if wait:
+        args += ["--wait", "--timeout", "90"]
+    return args
+
+
+def send(config, bundle, extra="", wait=False, dry_run=False):
+    text, attach = prompt_of(bundle, extra)
+    fd, name = tempfile.mkstemp(prefix="hex-lody-prompt-", suffix=".md")
+    prompt_file = Path(name)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        args = create_args(config, prompt_file, attach, wait)
+        if dry_run:
+            print("lody " + " ".join(args))
+            print("---\n" + text)
+            return None
+        run = lody(config, *args)
+    finally:
+        prompt_file.unlink(missing_ok=True)
+    reply = reply_of(run)
+    if run.returncode != 0 or not reply or not reply.get("ok"):
+        lines = run.stderr.strip().splitlines()
+        message = (reply or {}).get("error") or (lines[-1] if lines else run.stdout[-200:])
+        raise RuntimeError(f"lody session create failed: {message}")
+    return reply
+
+
+def notify(text):
+    script = f'display notification {json.dumps(text)} with title "hex-lody"'
+    subprocess.run(["osascript", "-e", script], capture_output=True)
+
+
+def bundles(config):
+    folder = captures_dir(config)
+    if not folder.is_dir():
+        return []
+    return sorted(p for p in folder.glob("*.scrawl") if p.is_dir())
+
+
+def ready(bundle, state):
+    manifest_path = bundle / "scrawl.json"
+    if not manifest_path.is_file() or not (bundle / "summary.md").is_file():
+        return False
+    if time.time() - manifest_path.stat().st_mtime < SETTLE_SECONDS:
+        return False
+    try:
+        manifest = manifest_of(bundle)
+    except ValueError:
+        return False
+    return (
+        manifest.get("createdAtMs", 0) >= state["armedAtMs"]
+        and not manifest.get("destination")
+        and bundle.name not in state["sent"]
+        and bundle.name not in state.get("undone", [])
+        and state["failed"].get(bundle.name, 0) < GIVE_UP_AFTER
+    )
+
+
+def scan(config, everything):
+    with Locked():
+        state = load_state()
+        if everything:
+            state["armedAtMs"] = 0
+        sent = 0
+        for bundle in bundles(config):
+            if not ready(bundle, state):
+                continue
+            try:
+                reply = send(config, bundle)
+            except Exception as error:
+                failures = state["failed"].get(bundle.name, 0) + 1
+                state["failed"][bundle.name] = failures
+                log(f"{bundle.name}: {error} (try {failures}/{GIVE_UP_AFTER})")
+                if failures == GIVE_UP_AFTER:
+                    notify(f"Could not send {bundle.name} to Lody: {error}")
+            else:
+                state["sent"][bundle.name] = {
+                    "sessionId": reply["sessionId"],
+                    "workspace": config.get("workspace"),
+                    "atMs": int(time.time() * 1000),
+                }
+                log(f"{bundle.name}: sent as session {reply['sessionId']}")
+                sent += 1
+            save_state(state)
+        return sent
+
+
+def undo(config, name):
+    with Locked():
+        state = load_state()
+        if not state["sent"]:
+            sys.exit("hex-lody: nothing was sent")
+        name = name or max(state["sent"], key=lambda n: state["sent"][n]["atMs"])
+        name = Path(name).name
+        entry = state["sent"].get(name)
+        if not entry:
+            sys.exit(f"hex-lody: {name} was not sent by this tool")
+        scope = ["--workspace", entry["workspace"]] if entry.get("workspace") else []
+        for verb in ("cancel", "archive"):
+            run = lody(config, "session", verb, entry["sessionId"], *scope, "--json")
+            reply = reply_of(run)
+            if verb == "archive" and not (reply and reply.get("ok")):
+                sys.exit(f"hex-lody: could not archive {entry['sessionId']}: {run.stdout[-200:]}")
+        del state["sent"][name]
+        state.setdefault("undone", []).append(name)
+        save_state(state)
+        print(f"undone: {name} (session {entry['sessionId']} cancelled and archived)")
+
+
+def install():
+    script = Path(__file__).resolve()
+    PLIST.parent.mkdir(parents=True, exist_ok=True)
+    PLIST.write_bytes(
+        plistlib.dumps(
+            {
+                "Label": LABEL,
+                "ProgramArguments": [sys.executable, str(script), "scan"],
+                "StartInterval": SCAN_SECONDS,
+                "RunAtLoad": True,
+                "EnvironmentVariables": {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
+            }
+        )
+    )
+    with Locked():
+        state = load_state()
+        state["armedAtMs"] = int(time.time() * 1000)
+        save_state(state)
+    domain = f"gui/{os.getuid()}"
+    subprocess.run(["launchctl", "bootout", f"{domain}/{LABEL}"], capture_output=True)
+    done = subprocess.run(["launchctl", "bootstrap", domain, str(PLIST)], capture_output=True, text=True)
+    if done.returncode != 0:
+        sys.exit(f"hex-lody: launchctl bootstrap failed: {done.stderr.strip()}")
+    print(f"installed: scans {captures_dir(load_config())} every {SCAN_SECONDS}s; only captures made from now on are sent")
+
+
+def uninstall():
+    subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"], capture_output=True)
+    PLIST.unlink(missing_ok=True)
+    print("uninstalled")
+
+
+def status():
+    config = load_config()
+    state = load_state()
+    loaded = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{LABEL}"], capture_output=True).returncode == 0
+    print(f"watcher: {'running' if loaded else 'not installed'}")
+    print(f"captures: {captures_dir(config)} ({len(bundles(config))} bundles)")
+    print(f"role: {config['agentRole']}  workspace: {config.get('workspace')}  machine: {config.get('machine')}")
+    print(f"sent: {len(state['sent'])}  failed: {sum(1 for n in state['failed'].values() if n >= GIVE_UP_AFTER)}")
+    for name, entry in sorted(state["sent"].items(), key=lambda kv: kv[1]["atMs"])[-3:]:
+        print(f"  {name} -> {entry['sessionId']}")
+
+
+def main():
+    parser = argparse.ArgumentParser(prog="hex-lody", description=__doc__.split("\n\n")[0])
+    commands = parser.add_subparsers(dest="command", required=True)
+    one = commands.add_parser("send", help="send one capture now")
+    one.add_argument("capture", type=Path)
+    one.add_argument("--extra", default="", help="text added after the summary")
+    one.add_argument("--wait", action="store_true", help="wait for the first reply and print it")
+    one.add_argument("--dry-run", action="store_true", help="print the Lody command and prompt")
+    every = commands.add_parser("scan", help="send new captures (what the watcher runs)")
+    every.add_argument("--all", action="store_true", help="include captures made before install")
+    back = commands.add_parser("undo", help="cancel and archive the newest (or named) sent session")
+    back.add_argument("capture", nargs="?")
+    commands.add_parser("install", help="run scan every few seconds with launchd")
+    commands.add_parser("uninstall", help="stop the launchd watcher")
+    commands.add_parser("status", help="show the watcher, config and recent sends")
+    args = parser.parse_args()
+
+    if args.command == "uninstall":
+        return uninstall()
+    config = load_config()
+    if args.command == "send":
+        bundle = args.capture.expanduser().resolve()
+        if not (bundle / "scrawl.json").is_file():
+            sys.exit(f"hex-lody: {bundle} is not a capture folder")
+        reply = send(config, bundle, args.extra, args.wait, args.dry_run)
+        if reply:
+            with Locked():
+                state = load_state()
+                state["sent"][bundle.name] = {
+                    "sessionId": reply["sessionId"],
+                    "workspace": config.get("workspace"),
+                    "atMs": int(time.time() * 1000),
+                }
+                save_state(state)
+            print(json.dumps(reply, ensure_ascii=False))
+    elif args.command == "scan":
+        scan(config, args.all)
+    elif args.command == "undo":
+        undo(config, args.capture)
+    elif args.command == "install":
+        install()
+    elif args.command == "status":
+        status()
+
+
+if __name__ == "__main__":
+    main()
