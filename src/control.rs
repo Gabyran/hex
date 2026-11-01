@@ -191,21 +191,19 @@ pub enum ControlCommand {
     ScrawlCaptureShow {
         capture: String,
     },
-    /// Sends a capture to an OpenCode session: `to`, or where its route or
-    /// its last send says.
+    /// Sends a capture to a new Lody session for the Agent Role in
+    /// `capture.routing`; `to` can only name that role.
     ScrawlCaptureSend {
         capture: String,
         #[serde(default)]
         to: Option<String>,
-        /// Also save a rule sending the capture's site or app there (the
-        /// newest routed capture only).
+        /// Refused: there are no rules to save.
         #[serde(default)]
         always: bool,
     },
     /// Takes the newest send back while it can be undone.
     ScrawlCaptureUndo,
-    /// What routing sees for a capture and what it decides. `ask_jev` asks
-    /// Jev again (one call).
+    /// What a send would do. `ask_jev` is ignored.
     ScrawlCaptureRoute {
         capture: String,
         #[serde(default)]
@@ -363,7 +361,7 @@ pub struct ScrawlCaptureSummary {
     pub words: usize,
     /// The session it was sent to, if it was.
     pub sent_to: Option<ScrawlCaptureSession>,
-    /// OpenCode didn't take its send yet; Hex retries it.
+    /// Lody didn't take its send yet; Hex retries it.
     #[serde(default)]
     pub queued: bool,
 }

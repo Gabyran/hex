@@ -6,7 +6,6 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -102,38 +101,7 @@ pub fn on_path(name: &str) -> Option<PathBuf> {
     })
 }
 
-/// The Mac whose OpenCode server holds Kit's sessions when it isn't this one: an SSH host from
-/// the host's [`RouterConfig::agent_host`](crate::RouterConfig).
-pub fn agent_host() -> Option<String> {
-    crate::env::get().config.agent_host().map(str::to_owned)
-}
-
-/// The `opencode` command to run on the agent host (`agentOpencode`, default `opencode`).
-fn agent_opencode() -> String {
-    crate::env::get().config.agent_opencode().to_owned()
-}
-
-pub fn shell_quote(text: &str) -> String {
-    format!("'{}'", text.replace('\'', "'\\''"))
-}
-
-/// A system command: `/usr/bin/<name>` on macOS; on Windows the copy in System32 (OpenSSH and
-/// bsdtar ship with Windows 10 and later), found through `PATH`.
-fn system_tool(name: &str) -> PathBuf {
-    if cfg!(windows) {
-        on_path(name).unwrap_or_else(|| PathBuf::from(name))
-    } else {
-        Path::new("/usr/bin").join(name)
-    }
-}
-
-pub fn ssh(host: &str) -> Command {
-    let mut command = Command::new(system_tool("ssh"));
-    command.args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=8", host]);
-    command
-}
-
-/// Bundle files too big to hold up queueing the session; they follow in the background.
+/// Bundle files too big to hold up queueing the session.
 pub const HEAVY_MEDIA: [&str; 5] = [
     "recording.mp4",
     "recording.mov",
@@ -143,232 +111,9 @@ pub const HEAVY_MEDIA: [&str; 5] = [
 ];
 /// Present in a copied bundle while its heavy media is still arriving.
 pub const MEDIA_PENDING: &str = ".media-pending";
-/// Present in a bundle on this Mac while its heavy media is being copied to the agent host.
-pub const MEDIA_SENDING: &str = ".media-sending";
-
-/// A tar of everything in bundle `name` but its heavy media and this Mac's own markers, to
-/// stdout. The recording's `capture.json` goes with it: it describes `recording.mp4`, which
-/// follows.
-fn light_files_tar(parent: &Path, name: &std::ffi::OsStr) -> Command {
-    let mut tar = Command::new(system_tool("tar"));
-    tar.arg("-C")
-        .arg(parent)
-        .args([
-            "--exclude=*/recording.mp4",
-            "--exclude=*/recording.mov",
-            "--exclude=*/audio.wav",
-            "--exclude=*/frames-full",
-            "--exclude=*/contact-sheet-full.png",
-            "--exclude=*/.media-sending",
-            // Retries belong to this Mac; a copied marker would only sit there.
-            "--exclude=*/.deliver.json",
-            "--exclude=*/.deliver.json.tmp",
-        ])
-        .arg("-cf")
-        .arg("-")
-        .arg(name);
-    tar
-}
-
-/// Copies a bundle to the same path on `host`, so the agent there can open its files.
-/// Syncs the contact sheet, keyframe PNGs, manifest, and summary synchronously so the session
-/// can be queued immediately, then streams heavy media (`recording.mp4`/`.mov`, `frames-full`)
-/// in the background for `scrawl zoom`, marked by [`MEDIA_PENDING`] until it lands.
-pub fn sync_bundle_to(host: &str, bundle_dir: &Path) -> Result<()> {
-    use std::process::Stdio;
-    let parent = bundle_dir.parent().context("Bundle has no parent")?;
-    let name = bundle_dir.file_name().context("Bundle has no name")?;
-    let mut tar = light_files_tar(parent, name)
-        .stdout(Stdio::piped())
-        .spawn()
-        .context("Could not start tar")?;
-    let parent_q = shell_quote(&parent.to_string_lossy());
-    let name_str = name.to_string_lossy().into_owned();
-    let heavy: Vec<String> = HEAVY_MEDIA
-        .iter()
-        .filter(|rel| bundle_dir.join(rel).exists())
-        .map(|rel| format!("{name_str}/{rel}"))
-        .collect();
-    let bundle_q = shell_quote(&parent.join(&name_str).to_string_lossy());
-    // The marker goes up with the light files, before the session is prompted, so `scrawl zoom`
-    // there knows the video is still on its way rather than missing.
-    let mark_pending = if heavy.is_empty() {
-        String::new()
-    } else {
-        format!(" && touch {bundle_q}/{MEDIA_PENDING}")
-    };
-    let output = ssh(host)
-        .arg(format!(
-            "mkdir -p {parent_q} && tar -C {parent_q} -xf -{mark_pending}"
-        ))
-        .stdin(tar.stdout.take().context("No tar output")?)
-        .output()
-        .context("Could not start ssh")?;
-    let _ = tar.wait();
-    ensure!(
-        output.status.success(),
-        "Copying the bundle to {host} failed: {}",
-        String::from_utf8_lossy(&output.stderr).trim()
-    );
-
-    if !heavy.is_empty() {
-        let host_owned = host.to_owned();
-        let parent_owned = parent.to_path_buf();
-        // Unpack into a staging folder and move into the bundle only once complete, so nothing on
-        // the other side ever reads a half-copied video; then clear the marker.
-        let staging_q = shell_quote(
-            &parent
-                .join(format!(".{name_str}.incoming"))
-                .to_string_lossy(),
-        );
-        let remote = format!(
-            "rm -rf {staging_q} && mkdir -p {staging_q} && tar -C {staging_q} -xf - && \
-             for f in {staging_q}/*/*; do rm -rf {bundle_q}/\"$(basename \"$f\")\" && mv \"$f\" {bundle_q}/; done; \
-             rm -rf {staging_q} {bundle_q}/{MEDIA_PENDING}"
-        );
-        // Held until the media lands, so the iPhone video isn't re-encoded or cleaned up under
-        // the copy (see `retention`).
-        let sending = bundle_dir.join(MEDIA_SENDING);
-        let _ = fs::write(&sending, host);
-        crate::env::spawn(move || {
-            let _done = RemoveOnDrop(sending);
-            let Ok(mut bg_tar) = Command::new(system_tool("tar"))
-                .arg("-C")
-                .arg(&parent_owned)
-                .arg("-cf")
-                .arg("-")
-                .args(&heavy)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .spawn()
-            else {
-                return;
-            };
-            if let Some(stdout) = bg_tar.stdout.take() {
-                let _ = ssh(&host_owned)
-                    .arg(remote)
-                    .stdin(stdout)
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status();
-            }
-            let _ = bg_tar.wait();
-        });
-    }
-    Ok(())
-}
-
-struct RemoveOnDrop(PathBuf);
-
-impl Drop for RemoveOnDrop {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
-    }
-}
-
-/// One request to the running local service over HTTP, or, when the agents run on another Mac,
-/// `opencode api` there over SSH. Nothing local is ever started.
-fn opencode_api(method: &str, path: &str, data: Option<&serde_json::Value>) -> Result<Vec<u8>> {
-    let Some(host) = agent_host() else {
-        let body = data.map(serde_json::to_vec).transpose()?;
-        let (address, password) = local_server();
-        return http_request(
-            address,
-            password.as_deref(),
-            &method.to_ascii_uppercase(),
-            path,
-            body.as_deref(),
-            SERVICE_TIMEOUT,
-        );
-    };
-    let command = {
-        let mut remote = format!(
-            "PATH=\"$HOME/bin:$HOME/.opencode/bin:/opt/homebrew/bin:$PATH\" {} api {} {}",
-            agent_opencode(),
-            shell_quote(method),
-            shell_quote(path)
-        );
-        if let Some(data) = data {
-            remote.push_str(&format!(
-                " --data {}",
-                shell_quote(&serde_json::to_string(data)?)
-            ));
-        }
-        let mut command = ssh(&host);
-        command.arg(remote);
-        command
-    };
-    let output = bounded_output(command)?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let message = format!("OpenCode API failed: {}", stderr.trim());
-        // `opencode api` prints `HTTP <status> <text>` to stderr when the server answered, and
-        // the answer's body to stdout.
-        let err = match cli_status(&stderr) {
-            Some(status) => anyhow::Error::new(HttpStatus(status)).context(message),
-            None => anyhow::anyhow!(message),
-        };
-        return Err(match said(&output.stdout) {
-            Some(said) => err.context(said),
-            None => err,
-        });
-    }
-    Ok(output.stdout)
-}
 
 /// How long a request to the local service may take (a prompt with inline images included).
 const SERVICE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-
-/// How much of the agent host's `opencode api` stderr is kept; the rest is read and dropped.
-const CLI_STDERR_LIMIT: u64 = 64 * 1024;
-
-/// `command.output()` with stdout capped at [`SERVER_RESPONSE_LIMIT`] (the child is killed
-/// past it) and stderr at [`CLI_STDERR_LIMIT`].
-fn bounded_output(mut command: Command) -> Result<std::process::Output> {
-    use std::io::Read;
-    use std::process::Stdio;
-    let mut child = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("Could not reach the agent host")?;
-    let mut stderr = child.stderr.take().context("No agent host stderr")?;
-    let errors = std::thread::spawn(move || {
-        let mut kept = Vec::new();
-        let _ = (&mut stderr).take(CLI_STDERR_LIMIT).read_to_end(&mut kept);
-        let _ = std::io::copy(&mut stderr, &mut std::io::sink());
-        kept
-    });
-    let mut stdout = Vec::new();
-    let read = child
-        .stdout
-        .take()
-        .context("No agent host output")?
-        .take(SERVER_RESPONSE_LIMIT + 1)
-        .read_to_end(&mut stdout);
-    let too_much = stdout.len() as u64 > SERVER_RESPONSE_LIMIT;
-    if too_much {
-        let _ = child.kill();
-    }
-    let status = child.wait().context("Could not wait for the agent host")?;
-    let stderr = errors.join().unwrap_or_default();
-    read.context("Could not read the agent host output")?;
-    ensure!(!too_much, "OpenCode response too large");
-    Ok(std::process::Output {
-        status,
-        stdout,
-        stderr,
-    })
-}
-
-/// The status in `opencode api`'s `HTTP 409 Conflict` line.
-fn cli_status(stderr: &str) -> Option<u16> {
-    stderr.lines().find_map(|line| {
-        let code = line.trim().strip_prefix("HTTP ")?.get(..3)?;
-        code.parse().ok().filter(|c| (100..600).contains(c))
-    })
-}
 
 pub fn query_escape(value: &str) -> String {
     let mut result = String::new();
@@ -640,17 +385,13 @@ fn said(body: &[u8]) -> Option<String> {
 }
 
 /// One request to the local OpenCode server (`method` is `GET`, `POST`, `DELETE`…) within
-/// `timeout`, through `opencode api` over SSH when the agents run on another Mac. A 4xx or 5xx answer is
-/// an [`HttpStatus`] error.
+/// `timeout`. A 4xx or 5xx answer is an [`HttpStatus`] error.
 pub fn api_within(
     method: &str,
     path: &str,
     data: Option<&serde_json::Value>,
     timeout: std::time::Duration,
 ) -> Result<Vec<u8>> {
-    if agent_host().is_some() {
-        return opencode_api(&method.to_ascii_lowercase(), path, data);
-    }
     let body = data.map(serde_json::to_vec).transpose()?;
     let (address, password) = local_server();
     http_request(
@@ -666,9 +407,6 @@ pub fn api_within(
 /// [`api_get`] for routing: talks HTTP directly to the local OpenCode server with a
 /// [`SERVER_CONNECT_TIMEOUT`] connect cap and `timeout` read deadline.
 pub fn api_get_within(path: &str, timeout: std::time::Duration) -> Result<Vec<u8>> {
-    if agent_host().is_some() {
-        return opencode_api("get", path, None);
-    }
     let (address, password) = local_server();
     http_get(address, password.as_deref(), path, timeout)
 }
@@ -883,10 +621,11 @@ fn post_prompt(session: &str, mut body: serde_json::Value) -> Result<Posted> {
     let delivery = crate::env::get().config.delivery.label();
     body["delivery"] = serde_json::json!(delivery);
     let was_idle = session_idle(session);
-    let answer = opencode_api(
-        "post",
+    let answer = api_within(
+        "POST",
         &format!("/api/session/{session}/prompt"),
         Some(&body),
+        SERVICE_TIMEOUT,
     )?;
     Ok(Posted {
         message_id: posted_id(&answer),
@@ -906,20 +645,9 @@ pub fn send_bundle(bundle_dir: &Path, session: &str) -> Result<Posted> {
                 .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'),
         "Invalid OpenCode session ID"
     );
-    if let Some(host) = agent_host() {
-        sync_bundle_to(&host, &directory)?;
-    }
-    // The agent host has the bundle at the same path (synced above), and an
-    // SSH command line can't carry inline images.
     // A capture with no screen (`no_screen`) sends its words alone: its sheet is blank.
     let files = if bundle.keyframes.is_empty() {
         Vec::new()
-    } else if agent_host().is_some() {
-        vec![serde_json::json!({
-            "uri": file_uri(&directory.join(&bundle.contact_sheet)),
-            "name": "contact-sheet.png",
-            "description": "Scrawl contact sheet: the capture's keyframes in order",
-        })]
     } else {
         inline_contact_sheet(&directory, &bundle)
     };
@@ -935,33 +663,6 @@ pub fn send_bundle(bundle_dir: &Path, session: &str) -> Result<Posted> {
         bundle.duration_ms,
     );
     post_prompt(session, serde_json::json!({ "text": text, "files": files }))
-}
-
-/// A `file://` URL for an absolute path, percent-encoding everything but unreserved
-/// characters and `/` ("Application Support" → "Application%20Support"). A Windows path
-/// (`C:\Users\…`, or `\\?\C:\…` after `canonicalize`) becomes `file:///C:/Users/…`.
-fn file_uri(path: &Path) -> String {
-    let mut text = path.to_string_lossy().into_owned();
-    let mut uri = String::from("file://");
-    let windows_path = cfg!(windows) || text.as_bytes().get(1) == Some(&b':');
-    if windows_path {
-        if let Some(rest) = text.strip_prefix(r"\\?\") {
-            text = rest.to_owned();
-        }
-        text = text.replace('\\', "/");
-        if !text.starts_with('/') {
-            uri.push('/');
-        }
-    }
-    for (index, byte) in text.bytes().enumerate() {
-        let drive_colon = windows_path && index == 1 && byte == b':';
-        if byte.is_ascii_alphanumeric() || b"-._~/".contains(&byte) || drive_colon {
-            uri.push(char::from(byte));
-        } else {
-            uri.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    uri
 }
 
 /// The most encoded bytes a send inlines, so a huge sheet never makes a prompt OpenCode refuses.
@@ -988,7 +689,7 @@ fn inline_contact_sheet(directory: &Path, bundle: &ScrawlBundle) -> Vec<serde_js
 }
 
 /// The host's summary of a bundle ([`crate::env::Summary`]), else its `summary.md`.
-fn summary_of(bundle: &ScrawlBundle, directory: &Path) -> String {
+pub(crate) fn summary_of(bundle: &ScrawlBundle, directory: &Path) -> String {
     match crate::env::get().summary {
         Some(summary) => summary(bundle, directory),
         None => fs::read_to_string(directory.join("summary.md")).unwrap_or_default(),
@@ -1085,113 +786,9 @@ pub mod fake_api {
 }
 
 #[cfg(test)]
-mod light_files {
-    use std::process::{Command, Stdio};
-
-    #[test]
-    fn the_first_copy_leaves_heavy_media_and_markers_and_keeps_the_recording_manifest() {
-        let parent =
-            std::env::temp_dir().join(format!("scrawl-light-{}", crate::util::make_bundle_id()));
-        let bundle = parent.join("a.scrawl");
-        std::fs::create_dir_all(bundle.join("frames-full")).unwrap();
-        for file in [
-            "scrawl.json",
-            "summary.md",
-            "capture.json",
-            "recording.mp4",
-            "audio.wav",
-            "frames-full/0001.png",
-            ".deliver.json",
-            ".media-sending",
-        ] {
-            std::fs::write(bundle.join(file), b"x").unwrap();
-        }
-        let mut tar = super::light_files_tar(&parent, bundle.file_name().unwrap())
-            .stdout(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let listed = Command::new("tar")
-            .arg("-tf")
-            .arg("-")
-            .stdin(tar.stdout.take().unwrap())
-            .output()
-            .unwrap();
-        assert!(tar.wait().unwrap().success());
-        let _ = std::fs::remove_dir_all(&parent);
-        let mut files: Vec<String> = String::from_utf8(listed.stdout)
-            .unwrap()
-            .lines()
-            .filter(|line| !line.ends_with('/'))
-            .map(str::to_owned)
-            .collect();
-        files.sort();
-        assert_eq!(
-            files,
-            [
-                "a.scrawl/capture.json",
-                "a.scrawl/scrawl.json",
-                "a.scrawl/summary.md"
-            ]
-        );
-    }
-}
-
-#[cfg(test)]
-mod sync_live_check {
-    /// Manual: `cargo test sync_to_pro -- --ignored` copies a dummy bundle to `pro` and checks the
-    /// heavy media lands atomically and the marker clears.
-    #[test]
-    #[ignore]
-    fn sync_to_pro() {
-        let base = std::path::PathBuf::from(std::env::var("HOME").unwrap())
-            .join("Library/Caches/scrawl-sync-live");
-        let _ = std::fs::remove_dir_all(&base);
-        let bundle = base.join("scrawl-synctest.scrawl");
-        std::fs::create_dir_all(bundle.join("frames-full")).unwrap();
-        std::fs::write(bundle.join("summary.md"), "hi").unwrap();
-        std::fs::write(bundle.join("recording.mp4"), vec![7u8; 8_000_000]).unwrap();
-        std::fs::write(bundle.join("frames-full/frame-01.png"), b"png").unwrap();
-        super::sync_bundle_to("pro", &bundle).unwrap();
-        let q = super::shell_quote(&bundle.to_string_lossy());
-        let check = format!("ls -a {q}; ls {q}/frames-full; wc -c < {q}/recording.mp4");
-        let mut out = String::new();
-        for _ in 0..40 {
-            std::thread::sleep(std::time::Duration::from_millis(250));
-            let o = super::ssh("pro").arg(&check).output().unwrap();
-            out = String::from_utf8_lossy(&o.stdout).into_owned();
-            if !out.contains(super::MEDIA_PENDING) && out.contains("8000000") {
-                break;
-            }
-        }
-        let _ = super::ssh("pro")
-            .arg(format!(
-                "rm -rf {}",
-                super::shell_quote(&base.to_string_lossy())
-            ))
-            .status();
-        assert!(
-            out.contains("8000000")
-                && out.contains("frame-01.png")
-                && !out.contains(super::MEDIA_PENDING),
-            "{out}"
-        );
-    }
-}
-
-#[cfg(test)]
 mod session_lookup {
     use super::fake_api::{serve, session};
     use super::*;
-
-    #[test]
-    fn file_uris_are_percent_encoded() {
-        assert_eq!(
-            file_uri(Path::new(
-                "/Users/example/Library/Application Support/scrawl/captures/a b#1.scrawl/contact-sheet.png"
-            )),
-            "file:///Users/example/Library/Application%20Support/scrawl/captures/a%20b%231.scrawl/contact-sheet.png"
-        );
-    }
 
     #[test]
     fn sessions_read_their_directory_from_v2_location_or_v1_field() {
@@ -1346,10 +943,7 @@ mod session_lookup {
     }
 
     #[test]
-    fn opencode_api_statuses_survive_the_cli() {
-        assert_eq!(super::cli_status("HTTP 409 Conflict\n"), Some(409));
-        assert_eq!(super::cli_status("warn: x\nHTTP 404 Not Found"), Some(404));
-        assert_eq!(super::cli_status("error: connect ECONNREFUSED"), None);
+    fn http_statuses_are_read_from_the_error() {
         let err = anyhow::Error::new(super::HttpStatus(404)).context("OpenCode API failed");
         assert_eq!(super::http_status(&err), Some(404));
         assert_eq!(super::http_status(&anyhow::anyhow!("down")), None);
@@ -1417,17 +1011,6 @@ mod session_lookup {
             said(&[b'x'; 1000]).unwrap().len(),
             "OpenCode said: ".len() + 300
         );
-    }
-
-    #[test]
-    fn agent_host_output_is_bounded() {
-        let mut command = Command::new("/bin/sh");
-        command.args(["-c", "head -c 200000 /dev/zero >&2; printf ok; exit 3"]);
-        let output = bounded_output(command).unwrap();
-        assert_eq!(output.stdout, b"ok");
-        assert_eq!(output.stderr.len() as u64, CLI_STDERR_LIMIT);
-        assert_eq!(output.status.code(), Some(3));
-        assert!(said(&vec![b'x'; 200_000]).is_some());
     }
 
     fn many(count: usize) -> Vec<OpenCodeSession> {

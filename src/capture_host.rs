@@ -276,13 +276,11 @@ pub enum CaptureCommand {
     /// snapshot shows nothing recording in between. With nothing recording,
     /// only starts.
     Switch(CaptureTarget),
-    /// Sends the newest written capture (`snapshot().last`) to `to` now: a
-    /// session ID, or a name its route lists, suggestions first. A send
-    /// already elsewhere is taken back first. `always` also saves a rule
-    /// sending its site or app there from now on.
+    /// Sends the newest written capture (`snapshot().last`) to `to` now:
+    /// the Agent Role its route lists. A send that went already stays.
     Send { to: String, always: bool },
-    /// Takes back the newest capture's send: one OpenCode took is
-    /// withdrawn unless the session already acted on it.
+    /// Takes back the newest capture's send: the Lody session it made is
+    /// cancelled and archived, unless Lody refuses.
     Undo,
     /// Pastes the newest written capture into the app in front, as
     /// Scrawl's Paste chip does: its contact sheet, then its summary.
@@ -1058,8 +1056,8 @@ pub struct SettledCapture {
     pub missing_transcript: Option<String>,
     /// Why a capture failed, when Hex knows.
     pub error: Option<String>,
-    /// Where a written capture goes, while captures are sent to OpenCode
-    /// (`capture.routing`'s `autoSend`).
+    /// Where a written capture goes, while captures are sent to Lody
+    /// (`capture.routing`'s `autoSend` and `agentLody`).
     pub route: Option<CaptureRoute>,
 }
 

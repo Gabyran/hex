@@ -77,10 +77,10 @@ pub fn send(capture: &str, to: Option<String>, always: bool) -> Result<ControlRe
     })
 }
 
-pub fn explain(capture: &str, ask_jev: bool) -> Result<ControlReply, ControlError> {
+pub fn explain(capture: &str, _ask_jev: bool) -> Result<ControlReply, ControlError> {
     let dir = resolve(capture)?;
     super::routing::router()
-        .run(|| scrawl_capture::routing::explain_bundle(&dir, None, ask_jev))
+        .run(|| scrawl_capture::lody::explain(&dir))
         .map(|explanation| ControlReply::ScrawlCaptureRoute { explanation })
         .map_err(|error| ControlError::new("failed", format!("{error:#}")))
 }

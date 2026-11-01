@@ -881,9 +881,6 @@ fn router_env_from(path: &Path) -> scrawl_router::env::Env {
     }
     config.smart_routing = experiment(crate::routing::SMART_ROUTING);
     config.jev_routing = experiment(crate::routing::jev::JEV_ROUTING);
-    if let Ok(host) = std::env::var("SCRAWL_AGENT_HOST") {
-        config.agent_host = Some(host);
-    }
     let support = dirs::home_dir().map(|home| home.join("Library/Application Support/scrawl"));
     let router = std::env::var_os("SCRAWL_ROUTER_DIR")
         .map(PathBuf::from)

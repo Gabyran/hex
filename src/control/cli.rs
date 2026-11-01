@@ -751,16 +751,15 @@ pub enum CaptureCommand {
         #[command(flatten)]
         output: Output,
     },
-    /// Send a capture to an OpenCode session.
+    /// Send a capture to a new Lody session for the Agent Role.
     Send {
         /// A bundle name, path, or `latest`.
         capture: String,
-        /// A session ID, or for the newest capture a session its route
-        /// lists by name. Without it, where its route or last send says.
+        /// The Agent Role; only the one in `capture.routing.agentLody`
+        /// is accepted, and it is what a send without it uses.
         #[arg(long)]
         to: Option<String>,
-        /// Also save a rule that always sends this capture's site or app
-        /// there (the newest routed capture only).
+        /// Refused: there are no rules to save.
         #[arg(long)]
         always: bool,
         #[command(flatten)]
@@ -780,15 +779,15 @@ pub enum CaptureCommand {
         #[command(flatten)]
         output: Output,
     },
-    /// What routing sees for a capture and what it decides (Scrawl's
-    /// `route --explain`). Sends nothing.
+    /// What a send would do: the Agent Role, the Lody CLI, and the files
+    /// that would go. Sends nothing.
     Route {
         /// A bundle name, path, or `latest`.
         capture: String,
         /// Accepted for Scrawl's spelling; `route` only ever explains.
         #[arg(long, hide = true)]
         explain: bool,
-        /// Ask Jev again now (one call).
+        /// Accepted and ignored: there is no Jev to ask.
         #[arg(long)]
         ask_jev: bool,
         #[command(flatten)]

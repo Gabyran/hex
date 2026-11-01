@@ -195,7 +195,7 @@ pub fn deliver_by<T>(
         Err(err) => {
             let error = format!("{err:#}");
             scrawl_log(format!(
-                "deliver: OpenCode send to {title} failed ({error}); retrying from the Mac"
+                "deliver: send to {title} failed ({error}); retrying from the Mac"
             ));
             let pending = Pending::new(session, title, key, &error, crate::util::now_epoch_ms());
             if let Err(err) = pending.write(dir) {

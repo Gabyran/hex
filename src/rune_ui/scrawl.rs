@@ -158,11 +158,41 @@ fn how_it_works(ui: &Ui, p: Paint) -> Vec<El> {
             "how-send",
             tr("Send"),
             Some(tr(
-                "Paste it anywhere, or click Send to… on the capsule to pick a session",
+                "Paste it anywhere, or it opens a new Lody session for your Agent Role",
             )),
             rune::el(),
         ),
     ]
+}
+
+/// Where annotations go: the Lody Agent Role in `capture.routing`, or why
+/// they are only copied.
+fn lody_rows(ui: &Ui, p: Paint) -> Vec<El> {
+    let config = ui.settings.capture.routing.config();
+    let role = config.agent_lody.role();
+    let description = match role {
+        _ if !config.send_captures => {
+            tr("Sending is off (autoSend in capture.routing), so annotations are only copied")
+                .to_string()
+        }
+        Some(role) => tr_fill("Every annotation starts a new Lody session for {}", role),
+        None => tr("Not set: annotations are only copied").to_string(),
+    };
+    let mut rows = vec![setting_row(
+        p,
+        "lody-role",
+        tr("Agent Role"),
+        Some(&description),
+        rune::el(),
+    )];
+    if role.is_none() {
+        rows.push(note(
+            "lody-role-hint",
+            tr("Set one with: hex settings set capture.routing.agentLody.agentRole <ID or name>"),
+            p.warning(),
+        ));
+    }
+    rows
 }
 
 fn scrawl_request(ui: &mut Ui, request: ScrawlRequest) {
@@ -419,6 +449,9 @@ pub(super) fn pane(ui: &Ui, p: Paint, layer: &mut Vec<El>) -> El {
     if enabled {
         content = content.child(section(p, "how", tr("How it works"), how_it_works(ui, p)));
     }
+    if enabled {
+        content = content.child(section(p, "lody", tr("Lody"), lody_rows(ui, p)));
+    }
     // Apple's speech recognizer is macOS's; Linux transcribes with Hex's model.
     if enabled && cfg!(target_os = "macos") {
         content = content.child(section(
@@ -578,6 +611,30 @@ mod tests {
             )]
         );
         assert!(!rt.state.platform.stale(PermissionKind::ScreenRecording));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_pane_says_when_no_lody_agent_role_is_set_and_only_then() {
+        let mut rt = pane("mac-scrawl");
+        assert!(rt.find("lody-role").is_some());
+        assert!(
+            rt.find("lody-role-hint").is_some(),
+            "without a role annotations are only copied, and the pane says how to set one"
+        );
+        rt.state.settings.capture.routing = scrawl_capture::RouterConfig {
+            agent_lody: scrawl_capture::LodyConfig {
+                agent_role: Some("前端".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+        .into();
+        rt.invalidate();
+        rt.settle_all();
+        rt.frame(0.0);
+        assert!(rt.find("lody-role").is_some());
+        assert!(rt.find("lody-role-hint").is_none());
     }
 
     #[test]

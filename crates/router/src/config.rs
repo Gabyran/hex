@@ -29,6 +29,44 @@ impl DeliveryMode {
     }
 }
 
+/// Where a capture goes: a new Lody session each time, for one Agent Role, through Lody's own
+/// CLI (`agentLody`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LodyConfig {
+    /// The Agent Role's ID or name. Without one, captures are not sent.
+    pub agent_role: Option<String>,
+    /// A local project's ID, name, or path for the session to work in.
+    pub local_project: Option<String>,
+    /// The Lody workspace's ID, slug, or name, when the login has more than one.
+    pub workspace: Option<String>,
+    /// The `lody` executable, when the usual places don't have it.
+    pub cli: Option<String>,
+}
+
+impl LodyConfig {
+    /// The Agent Role, when one is set.
+    pub fn role(&self) -> Option<&str> {
+        present(&self.agent_role)
+    }
+
+    pub fn project(&self) -> Option<&str> {
+        present(&self.local_project)
+    }
+
+    pub fn workspace(&self) -> Option<&str> {
+        present(&self.workspace)
+    }
+
+    pub fn cli(&self) -> Option<&str> {
+        present(&self.cli)
+    }
+}
+
+fn present(value: &Option<String>) -> Option<&str> {
+    value.as_deref().map(str::trim).filter(|v| !v.is_empty())
+}
+
 /// The router's settings. Scrawl keeps them in `~/.config/scrawl/config.json`
 /// ([`parse_scrawl_config`] reads that file's text); a host may keep them anywhere.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -63,11 +101,8 @@ pub struct RouterConfig {
     /// The OpenCode key Jev is called with; absent uses `$OPENCODE_API_KEY` or OpenCode's own
     /// credential (`jevApiKey`).
     pub jev_api_key: Option<String>,
-    /// The SSH host whose OpenCode server holds the sessions, when it isn't this Mac
-    /// (`agentHost`).
-    pub agent_host: Option<String>,
-    /// The `opencode` command on the agent host (`agentOpencode`, default `opencode`).
-    pub agent_opencode: Option<String>,
+    /// Where a capture goes: a new Lody session for an Agent Role (`agentLody`).
+    pub agent_lody: LodyConfig,
     /// Whether a capture of a dev site goes straight to its session (top-level `autoSend`,
     /// default on).
     pub send_captures: bool,
@@ -88,8 +123,7 @@ impl Default for RouterConfig {
             jev_routing: false,
             jev: None,
             jev_api_key: None,
-            agent_host: None,
-            agent_opencode: None,
+            agent_lody: LodyConfig::default(),
             send_captures: true,
         }
     }
@@ -118,19 +152,6 @@ impl RouterConfig {
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect()
-    }
-
-    /// `agent_host` when it's safe to pass to `ssh`.
-    pub fn agent_host(&self) -> Option<&str> {
-        self.agent_host.as_deref().filter(|h| safe_word(h))
-    }
-
-    /// The `opencode` command on the agent host.
-    pub fn agent_opencode(&self) -> &str {
-        self.agent_opencode
-            .as_deref()
-            .filter(|c| safe_word(c))
-            .unwrap_or("opencode")
     }
 
     /// Whether Jev is asked: both experiments on.
@@ -165,14 +186,6 @@ impl RouterConfig {
         }
         Ok(next)
     }
-}
-
-/// Safe to put unquoted in a remote shell command (host names, `~/bin/tool` paths).
-pub fn safe_word(text: &str) -> bool {
-    !text.is_empty()
-        && text
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"-_.@/~".contains(&b))
 }
 
 fn expand(map: &BTreeMap<String, String>) -> Vec<(String, PathBuf)> {
@@ -238,8 +251,6 @@ fn router_config_from_value(
         config.jev = Some(value.clone());
     }
     config.jev_api_key = text(root, "jevApiKey", warnings);
-    config.agent_host = text(root, "agentHost", warnings);
-    config.agent_opencode = text(root, "agentOpencode", warnings);
     match root.get("autoSend") {
         None | Some(Value::Null) => {}
         Some(Value::Bool(on)) => config.send_captures = *on,
@@ -432,7 +443,7 @@ mod tests {
             r#"{"routing": {"autoSend": "never", "undoWindowSec": "15",
                 "sites": {"https://a.example": "~/a", "https://b.example": 3},
                 "apps": {"com.apple.Safari": "~/x", "com.example.tool": "ses_t"}},
-                "delivery": 3, "agentHost": "studio",
+                "delivery": 3,
                 "experiments": {"smartRouting": "on", "jevRouting": "maybe"}}"#,
         );
         assert_eq!(config.auto_send, AutoSend::Never);
@@ -443,7 +454,6 @@ mod tests {
         );
         assert_eq!(config.apps.len(), 1, "general-purpose apps are dropped");
         assert_eq!(config.delivery, DeliveryMode::Steer);
-        assert_eq!(config.agent_host.as_deref(), Some("studio"));
         assert!(config.smart_routing && !config.jev_routing);
         assert_eq!(warnings.len(), 5, "{warnings:#?}");
         let config = parse_scrawl_config(r#"{"routing": 3, "autoSend": false}"#);

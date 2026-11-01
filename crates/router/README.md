@@ -2,6 +2,8 @@
 
 Where a capture or dictation goes among OpenCode sessions, sending it there, and taking it back. Scrawl's `scrawl router …` commands and Hex call the same code: Scrawl through its CLI and app, Hex in-process through `Router`.
 
+`lody` is the other way out: it sends a capture to a new Lody session for an Agent Role through Lody's own CLI (`lody session create`), found on `PATH` or in Lody.app and never started. Hex sends captures there and no longer calls the OpenCode paths below; Scrawl's own app and iPhone ingest still do.
+
 The host owns the settings and the folders. The library never reads Scrawl's `~/.config/scrawl/config.json` and never picks a folder of its own. It builds without gpui, ScreenCaptureKit, the Swift helper, cpal or objc2: its dependencies are `anyhow`, `dirs`, `libc`, `serde` and `serde_json`.
 
 ## Using it
@@ -76,8 +78,7 @@ Serde camelCase, every field optional. `parse_scrawl_config(&str)` reads them fr
 | `jev_routing` | `experiments.jevRouting` | Ask Jev (needs `smart_routing`). |
 | `jev` | `jevRouting` (an object) | Jev's thresholds and options. |
 | `jev_api_key` | `jevApiKey` | The key Jev is called with; absent uses `$OPENCODE_API_KEY`, then OpenCode's own credential. |
-| `agent_host` | `agentHost` | The SSH host whose OpenCode server holds the sessions, when it isn't this Mac. |
-| `agent_opencode` | `agentOpencode` | The `opencode` command on that host. |
+| `agent_lody` | `agentLody` (Hex's `capture.routing` only) | Where Hex sends a capture: a new Lody session. An object with `agentRole` (the Agent Role's ID or name; none, nothing is sent), `localProject` (optional) and `cli` (the `lody` executable, optional). |
 | `send_captures` | `autoSend` | Whether a capture of a dev site goes straight to its session (default on). |
 
 ## The folders (`RouterDirs`)
@@ -98,4 +99,4 @@ Each is `Option<PathBuf>`; `None` turns off what needs it. `RouterDirs::under(ro
 
 It reads OpenCode's own files to reach the server and its history: `service.json` under `$XDG_STATE_HOME/opencode`, `~/.local/state/opencode` and `$OPENCODE_CONFIG_DIR` / `$XDG_CONFIG_HOME/opencode`; OpenCode's database read-only (`$OPENCODE_DB`, else found through the server); and `$OPENCODE_PASSWORD` / `$OPENCODE_SERVER_PASSWORD`, `$OPENCODE_SESSION_ID`, `$OPENCODE_API_KEY` and `$SCRAWL_NO_OPENCODE`.
 
-It never reads `~/.config/scrawl/config.json` or `$SCRAWL_CONFIG`, never writes under `~/Library/Application Support/scrawl` unless the host's `RouterDirs` point there, and never reads `$SCRAWL_ROUTER_DIR`, `$SCRAWL_ROUTING_LOG` or `$SCRAWL_AGENT_HOST` (Scrawl reads those and passes the result in). Outside a `Router` call with no fallback installed it is inert: default settings, no folders, no log, and no OpenCode history read. Tests rely on that.
+It never reads `~/.config/scrawl/config.json` or `$SCRAWL_CONFIG`, never writes under `~/Library/Application Support/scrawl` unless the host's `RouterDirs` point there, and never reads `$SCRAWL_ROUTER_DIR` or `$SCRAWL_ROUTING_LOG` (Scrawl reads those and passes the result in). Outside a `Router` call with no fallback installed it is inert: default settings, no folders, no log, and no OpenCode history read. Tests rely on that.

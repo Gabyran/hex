@@ -486,7 +486,7 @@ pub fn path_clue(page: &Page) -> Option<Clue> {
 /// database read-only (found through the process `/api/info` names), with a time limit; any
 /// failure is no answer.
 pub fn opencode_writes(needle: &str, from: u64, to: u64) -> Vec<Write> {
-    if !crate::env::get().live || crate::opencode::agent_host().is_some() {
+    if !crate::env::get().live {
         return Vec::new();
     }
     let Some(db) = opencode_db() else {

@@ -1608,7 +1608,8 @@ pub struct CaptureSettings {
     pub media_days: Option<u32>,
     /// Days a capture is kept at all; `None` keeps it.
     pub bundle_days: Option<u32>,
-    /// Where a written capture is sent among OpenCode sessions: Scrawl's
+    /// Where a written capture goes: `agentLody` names the Lody Agent Role
+    /// that gets a new session for it. The other settings are Scrawl's
     /// router settings, imported once from Scrawl.
     pub routing: CaptureRouting,
     /// Lets screen recordings, Hex's own captures included, show Hex's

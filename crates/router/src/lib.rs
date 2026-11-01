@@ -6,6 +6,7 @@ pub mod bundle;
 pub mod config;
 pub mod delivery;
 pub mod env;
+pub mod lody;
 pub mod model;
 pub mod opencode;
 pub mod routing;
@@ -18,8 +19,8 @@ use std::time::Duration;
 use anyhow::{Result, anyhow};
 
 pub use config::{
-    DeliveryMode, RouterConfig, RouterDirs, parse_scrawl_config, parse_scrawl_config_with_warnings,
-    router_config_from_scrawl,
+    DeliveryMode, LodyConfig, RouterConfig, RouterDirs, parse_scrawl_config,
+    parse_scrawl_config_with_warnings, router_config_from_scrawl,
 };
 pub use routing::jev::Action;
 pub use routing::policy::{AutoSend, OfferRule, RuleKind};

@@ -547,7 +547,27 @@ const CAPTURE_KEYS: &[Key] = &[
     key(
         "capture.routing",
         Kind::Json,
-        "Where captures go among OpenCode sessions: Scrawl's router settings (autoSend, sites, apps, smartRouting, …) as a JSON object",
+        "Where captures go: Scrawl's router settings as a JSON object, with agentLody holding the Lody Agent Role captures are sent to",
+    ),
+    optional(
+        "capture.routing.agentLody.agentRole",
+        Kind::Text,
+        "The Lody Agent Role (ID or name) that gets a new session for every capture; none sends nothing, and captures are only copied",
+    ),
+    optional(
+        "capture.routing.agentLody.localProject",
+        Kind::Text,
+        "The Lody local project (ID, name, or path) a capture's session works in; none leaves it to the Agent Role",
+    ),
+    optional(
+        "capture.routing.agentLody.workspace",
+        Kind::Text,
+        "The Lody workspace (ID, slug, or name) captures are sent to; needed when the Lody login has more than one",
+    ),
+    optional(
+        "capture.routing.agentLody.cli",
+        Kind::Text,
+        "The lody executable, when Hex finds neither `lody` on PATH nor Lody.app's own CLI",
     ),
     key(
         "capture.show_overlays_in_recordings",
@@ -1341,6 +1361,51 @@ mod tests {
                 .code,
             "invalid-value"
         );
+    }
+
+    #[cfg(hex_capture)]
+    #[test]
+    fn the_lody_agent_role_is_set_by_its_own_key_and_cleared_with_none() {
+        let settings = AppSettings::default();
+        let role = |settings: &AppSettings| settings.capture.routing.config().agent_lody.clone();
+        assert_eq!(role(&settings).agent_role, None);
+        let set = apply(
+            &settings,
+            "capture.routing.agentLody.agentRole",
+            "前端",
+            &rules(),
+        )
+        .unwrap();
+        let lody = role(&set.settings);
+        assert_eq!(lody.role(), Some("前端"));
+        let set = apply(
+            &set.settings,
+            "capture.routing.agentLody.localProject",
+            "~/code/hex",
+            &rules(),
+        )
+        .unwrap();
+        let set = apply(
+            &set.settings,
+            "capture.routing.agentLody.cli",
+            "/opt/lody",
+            &rules(),
+        )
+        .unwrap();
+        let lody = role(&set.settings);
+        assert_eq!(
+            (lody.role(), lody.project(), lody.cli()),
+            (Some("前端"), Some("~/code/hex"), Some("/opt/lody"))
+        );
+        let cleared = apply(
+            &set.settings,
+            "capture.routing.agentLody.agentRole",
+            "none",
+            &rules(),
+        )
+        .unwrap();
+        assert_eq!(role(&cleared.settings).role(), None);
+        assert_eq!(role(&cleared.settings).project(), Some("~/code/hex"));
     }
 
     #[test]
