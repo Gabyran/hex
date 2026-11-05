@@ -1,5 +1,20 @@
 # @kitlangton/hex
 
+## 0.3.2
+
+### Patch Changes
+
+- 5c5f0f6: `ModelId` also takes `custom-<16 hex digits>`, a model imported with Labs › Use your own speech model, and model listings keep imported models instead of dropping them.
+- 54d8f53: `ModelInfo` gains `source`: `download`, `hex`, `imported`, or `found: owner/name@abcdef1` for a model another app downloaded to the Hugging Face cache, which Hex uses where it is. It is `null` from older hosts.
+- efa1aa0: `ModelId` gains `gigaam_v3`, ai-sage's GigaAM v3 e2e RNN-T: Russian only, cased and punctuated.
+- 8a327aa: `ModelId` gains `granite_speech_5`, IBM's Granite Speech 5.0 470M TurboCTC: English, French, German, Spanish, Portuguese, Italian, and Japanese, cased and punctuated.
+- e76afaa: `connect()` reads the macOS discovery file from `~/Library/Application Support/hex`, where Hex now keeps its data.
+- d86d494: `ModelId` gains `ivrit_whisper_large_v3_turbo`, ivrit.ai's Hebrew fine-tune of Whisper large-v3-turbo.
+- 9c91096: `connect()` finds the running Hex on Linux (`$XDG_DATA_HOME/hex`) and Windows (`%APPDATA%\hex`) as well as macOS.
+- 637b1f9: `ModelId` gains `nb_whisper_medium`, the National Library of Norway's Whisper medium fine-tune for Norwegian.
+- caa2917: `ModelId` gains `nemotron_3_5_asr`, NVIDIA's Nemotron 3.5 ASR Streaming 0.6B: 27 languages, streaming, and automatic language detection.
+- dff0d7e: `ModelId` gains `parakeet_ultra`, Moondream's Parakeet Ultra (Labs › Parakeet Ultra).
+
 ## 0.3.1
 
 ### Patch Changes
